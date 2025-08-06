@@ -7,10 +7,11 @@ def main():
     st.set_page_config(page_title="📄 成績單學分計算工具", layout="wide")
     st.title("📄 成績單學分計算工具")
 
-    st.write("請上傳 PDF（純表格）格式的成績單檔案。")
+        # --- 文件上传区 ---
+    st.write("請上傳 PDF（純表格）或 Word (.docx) 格式的成績單檔案。")
     uploaded_file = st.file_uploader(
-        "選擇一個成績單檔案（目前僅支援 PDF）",
-        type="pdf"
+        "選擇一個成績單檔案（支援 PDF, DOCX）",
+        type=["pdf", "docx"]
     )
 
     if not uploaded_file:
@@ -102,3 +103,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
