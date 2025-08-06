@@ -1,69 +1,90 @@
 # utils/pdf_processing.py
+
 import streamlit as st
 import pandas as pd
 import pdfplumber
 import collections
 import re
+from .grade_analysis import parse_credit_and_gpa, is_passing_gpa
 
-def normalize_text(cell_content):
-    if cell_content is None:
+def normalize_text(cell):
+    """
+    统一清洗 pdfplumber 提取的文本，去除换行、重复空白。
+    """
+    if cell is None:
         return ""
-    text = str(cell_content.text) if hasattr(cell_content, "text") else str(cell_content)
-    return re.sub(r'\s+', ' ', text).strip()
+    txt = str(cell)
+    return re.sub(r"\s+", " ", txt).strip()
 
-def make_unique_columns(columns_list):
-    seen = collections.defaultdict(int)
-    unique = []
-    for col in columns_list:
-        base = normalize_text(col) or "Column"
-        name = base
-        idx = seen[base]
-        while name in unique:
-            idx += 1
-            name = f"{base}_{idx}"
-        unique.append(name)
-        seen[base] = idx
-    return unique
+def make_unique_columns(header_row):
+    """
+    给表头生成唯一列名列表，处理重复和空字符串。
+    """
+    seen = collections.Counter()
+    unique_cols = []
+    for raw in header_row:
+        name = normalize_text(raw)
+        if not name or len(name) < 2:
+            base = "Column"
+        else:
+            base = name
+        cnt = seen[base]
+        col_name = f"{base}_{cnt}" if cnt > 0 else base
+        unique_cols.append(col_name)
+        seen[base] += 1
+    return unique_cols
 
 def is_grades_table(df):
-    # 同原本邏輯：檢查表頭與內容
-    cols = [re.sub(r'\s+','',c).lower() for c in df.columns]
-    if any(k in col for k in cols for k in ["學分","credit"]) and \
-       any(k in col for k in cols for k in ["科目","subject"]) and \
-       any(k in col for k in cols for k in ["gpa","成績"]):
-        return True
-    # 簡化：只要有「科目名稱」＋「學分」即可當成成績表
-    return False
+    """
+    简单判断一个 DataFrame 是否可能是成绩表：看是否有 科目/学分/GPA/学年/学期 五列之一。
+    """
+    cols = [re.sub(r"\s+", "", c).lower() for c in df.columns]
+    has = lambda keys: any(any(k in c for k in keys) for c in cols)
+    return (
+        has(["科目", "course", "subject"]) and
+        (has(["學分", "credit"]) or has(["gpa", "成績"])) and
+        has(["學年", "year"]) and
+        has(["學期", "semest"])
+    )
 
 def process_pdf_file(uploaded_file):
+    """
+    用 pdfplumber 提取所有表格，筛选成绩表并返回 DataFrame 列表。
+    """
     all_tables = []
     try:
         with pdfplumber.open(uploaded_file) as pdf:
-            for i, page in enumerate(pdf.pages):
-                settings = {
+            for page_num, page in enumerate(pdf.pages, start=1):
+                tables = page.extract_tables({
                     "vertical_strategy": "lines",
                     "horizontal_strategy": "lines",
-                    "edge_min_length": 3,
-                    "join_tolerance": 5,
                     "snap_tolerance": 3,
-                    "text_tolerance": 2,
-                    "min_words_vertical": 1,
-                    "min_words_horizontal": 1,
-                }
-                tables = page.extract_tables(settings)
-                for tbl in tables:
-                    rows = [[normalize_text(cell) for cell in row] for row in tbl]
-                    # 去除全空 row
-                    rows = [r for r in rows if any(r)]
-                    if len(rows) < 2:
+                    "join_tolerance": 5,
+                    "edge_min_length": 3,
+                    "text_tolerance": 2
+                })
+                if not tables:
+                    continue
+
+                for tbl_idx, table in enumerate(tables, start=1):
+                    # 清洗空行
+                    rows = [[normalize_text(cell) for cell in row] for row in table]
+                    rows = [r for r in rows if any(cell for cell in r)]
+                    if len(rows) < 2 or len(rows[0]) < 3:
                         continue
+
                     header, *data = rows
                     cols = make_unique_columns(header)
-                    df = pd.DataFrame(data, columns=cols)
+                    # 对齐每行长度
+                    ncol = len(cols)
+                    clean = [
+                        (r[:ncol] if len(r) >= ncol else r + [""]*(ncol-len(r)))
+                        for r in data
+                    ]
+                    df = pd.DataFrame(clean, columns=cols)
                     if is_grades_table(df):
-                        st.success(f"頁面 {i+1} 偵測到成績表格並已處理。")
+                        st.success(f"頁面 {page_num} 表格 {tbl_idx} 已識別並處理")
                         all_tables.append(df)
     except Exception as e:
-        st.error(f"PDF 處理失敗：{e}")
-
+        st.error(f"PDF 处理失败：{e}")
     return all_tables
