@@ -1,6 +1,12 @@
-streamlit
-pandas
-pdfplumber>=0.10.0
-pdf2image
-Pillow
-easyocr
+-streamlit
+-pandas
+-pdfplumber>=0.10.0
+-pdf2image
+-Pillow
+-easyocr
++streamlit
++pandas
++pdfplumber>=0.10.0
++PyMuPDF            # 用来渲染 PDF
++Pillow
++easyocr
