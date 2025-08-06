@@ -82,7 +82,7 @@ def process_pdf_file(uploaded_file):
             if tables:
                 return tables
 
-            st.info("未檢測到表格，启用純文字回退解析…")
+            st.info("未檢測到表格，啟用純文字回退解析…")
             fallback_df = regex_fallback_to_df(pdf)
             if fallback_df is not None:
                 return [fallback_df]
@@ -92,4 +92,5 @@ def process_pdf_file(uploaded_file):
     except Exception as e:
         st.error(f"PDF 解析失敗：{e}")
         return []
+
 
