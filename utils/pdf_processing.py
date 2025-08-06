@@ -1,9 +1,11 @@
 # utils/pdf_processing.py
 
-import io, re, streamlit as st
+import io
+import re
+import streamlit as st
 import pandas as pd
 import pdfplumber
-from pdf2image import convert_from_bytes
+import fitz                 # PyMuPDF
 from PIL import Image
 import easyocr
 
@@ -12,60 +14,58 @@ def normalize(text):
     return re.sub(r"\s+", " ", str(text) or "").strip()
 
 def _table_to_df(raw_table):
-    """
-    把 pdfplumber 提取的 table(list of rows) 转成 DataFrame，去空行、补齐列数。
-    """
     rows = [[normalize(c) for c in row] for row in raw_table]
     rows = [r for r in rows if any(cell for cell in r)]
-    if not rows: return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
     header, *data = rows
     n = len(header)
     cleaned = []
     for row in data:
         if len(row) < n:
-            row = row + [""]*(n-len(row))
+            row = row + [""] * (n - len(row))
         elif len(row) > n:
             row = row[:n]
         cleaned.append(row)
-    df = pd.DataFrame(cleaned, columns=header)
-    return df
+    return pd.DataFrame(cleaned, columns=header)
 
 def _is_grades_table(df):
-    """
-    简单检测：列数 >=3，且有“學分”“科目”类似列头。
-    """
-    cols = [re.sub(r"\s+","",c).lower() for c in df.columns]
+    cols = [re.sub(r"\s+", "", c).lower() for c in df.columns]
     has_credit = any("學分" in c or "credit" in c for c in cols)
     has_subj   = any("科目" in c or "課程" in c or "subject" in c for c in cols)
-    return has_credit and has_subj and df.shape[1]>=3
+    return has_credit and has_subj and df.shape[1] >= 3
+
+def _pdf_to_images_via_fitz(pdf_bytes):
+    """
+    使用 PyMuPDF 渲染每一页为 PIL.Image，不依赖 poppler。
+    """
+    images = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page in doc:
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x 放大提高 OCR 识别率
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+    return images
 
 def ocr_with_easyocr(pdf_bytes):
-    """
-    用 EasyOCR 对每页做 OCR，回传所有行的文字列表。
-    """
     reader = easyocr.Reader(['ch_tra','en'], gpu=False)
-    imgs = convert_from_bytes(pdf_bytes)
+    images = _pdf_to_images_via_fitz(pdf_bytes)
     lines = []
-    for img in imgs:
+    for img in images:
         result = reader.readtext(
-            np.array(img),
-            detail=0,           # 只取文字，不要框坐标
-            paragraph=False     # 单行输出
+            # easyocr 接受 numpy array
+            __import__('numpy').array(img),
+            detail=0,
+            paragraph=False
         )
         lines.extend(result)
     return [normalize(l) for l in lines if normalize(l)]
 
 def process_pdf_file(uploaded_file):
-    """
-    主流程：
-    1. 先用 pdfplumber 尝试抽表格并识别成绩表
-    2. 如果没抽到任何表格，就用 OCR（EasyOCR）把整份 PDF 转成行
-    3. 再用行级正则把“學年度 學期 科目 學分 GPA”分离出来，拼 DataFrame 返回
-    """
     raw = uploaded_file.read()
     dfs = []
 
-    # --- 步骤 1：pdfplumber 提取表格 ---
+    # 1. 先试 pdfplumber 表格
     try:
         with pdfplumber.open(io.BytesIO(raw)) as pdf:
             for p in pdf.pages:
@@ -85,10 +85,10 @@ def process_pdf_file(uploaded_file):
         st.warning(f"pdfplumber 失败: {e}")
 
     if dfs:
-        st.success(f"成功从 PDF 表格 提取到 {len(dfs)} 张成绩表")
+        st.success(f"成功从 PDF 表格提取到 {len(dfs)} 张成绩表")
         return dfs
 
-    # --- 步骤 2：OCR 后备 ---
+    # 2. 再用 OCR 后备
     st.info("未检测到表格，启用 OCR 后备 (EasyOCR)…")
     try:
         lines = ocr_with_easyocr(raw)
@@ -100,11 +100,9 @@ def process_pdf_file(uploaded_file):
         st.error("OCR 也未识别到任何文字")
         return []
 
-    # --- 步骤 3：行级正则提取 ---
-    # 合并断行：逐行累 buffer，直到匹配末尾 pattern
+    # 3. 行级正则合并 & 提取
     end_pat = re.compile(r".+\s+\d+(\.\d+)?\s+([A-F][+\-]?|通過|抵免)$")
-    merged = []
-    buf = ""
+    merged, buf = [], ""
     for l in lines:
         if buf:
             l = buf + " " + l
@@ -113,15 +111,14 @@ def process_pdf_file(uploaded_file):
             buf = l
         else:
             merged.append(l)
-    # 再用正则分组
+
     entry_pat = re.compile(
         r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)$"
     )
     rows = []
     for l in merged:
         m = entry_pat.match(l)
-        if not m: 
-            # 可以打印日志看看哪些没匹配上
+        if not m:
             st.debug(f"OCR 未匹配: {l}")
             continue
         y, sem, subj, cr, gpa = m.groups()
