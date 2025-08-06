@@ -65,7 +65,7 @@ def main():
         df_passed = st.dataframe(
             passed, use_container_width=True
         )
-        csv_passed = st.experimental_get_query_params()  # 這裡可依需求調整
+        csv_passed = st.query_params()  # 這裡可依需求調整
     else:
         st.info("沒有找到任何通過的課程。")
 
@@ -83,3 +83,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
