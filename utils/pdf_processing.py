@@ -1,153 +1,142 @@
 # utils/pdf_processing.py
 
-import streamlit as st
+import io, re, streamlit as st
 import pandas as pd
 import pdfplumber
-import collections
-import re
+from pdf2image import convert_from_bytes
+from PIL import Image
+import easyocr
 
-def normalize_text(cell_content):
-    if cell_content is None:
-        return ""
-    if hasattr(cell_content, 'text'):
-        text = str(cell_content.text)
-    elif isinstance(cell_content, str):
-        text = cell_content
-    else:
-        text = str(cell_content)
-    return re.sub(r'\s+', ' ', text).strip()
+def normalize(text):
+    """把任何输入转成 str，去多余空白"""
+    return re.sub(r"\s+", " ", str(text) or "").strip()
 
-def make_unique_columns(columns_list):
-    seen = collections.defaultdict(int)
-    unique_columns = []
-    for col in columns_list:
-        original = normalize_text(col)
-        if not original or len(original) < 2:
-            base = "Column"
-            idx = 1
-            while f"{base}_{idx}" in unique_columns:
-                idx += 1
-            name = f"{base}_{idx}"
-        else:
-            name = original
-        final = name
-        cnt = seen[name]
-        while final in unique_columns:
-            cnt += 1
-            final = f"{name}_{cnt}"
-        unique_columns.append(final)
-        seen[name] = cnt
-    return unique_columns
+def _table_to_df(raw_table):
+    """
+    把 pdfplumber 提取的 table(list of rows) 转成 DataFrame，去空行、补齐列数。
+    """
+    rows = [[normalize(c) for c in row] for row in raw_table]
+    rows = [r for r in rows if any(cell for cell in r)]
+    if not rows: return pd.DataFrame()
+    header, *data = rows
+    n = len(header)
+    cleaned = []
+    for row in data:
+        if len(row) < n:
+            row = row + [""]*(n-len(row))
+        elif len(row) > n:
+            row = row[:n]
+        cleaned.append(row)
+    df = pd.DataFrame(cleaned, columns=header)
+    return df
 
-def is_grades_table(df):
-    if df.empty or len(df.columns) < 3:
-        return False
-    normalized_columns = [re.sub(r'\s+', '', c).lower() for c in df.columns]
-    credit_kw = ["學分", "credit"]
-    gpa_kw    = ["gpa", "成績", "grade"]
-    subject_kw= ["科目名稱", "課程名稱", "subject", "course"]
-    year_kw   = ["學年", "year"]
-    sem_kw    = ["學期", "semester"]
+def _is_grades_table(df):
+    """
+    简单检测：列数 >=3，且有“學分”“科目”类似列头。
+    """
+    cols = [re.sub(r"\s+","",c).lower() for c in df.columns]
+    has_credit = any("學分" in c or "credit" in c for c in cols)
+    has_subj   = any("科目" in c or "課程" in c or "subject" in c for c in cols)
+    return has_credit and has_subj and df.shape[1]>=3
 
-    has_credit = any(any(k in c for k in credit_kw) for c in normalized_columns)
-    has_gpa    = any(any(k in c for k in gpa_kw)    for c in normalized_columns)
-    has_subj   = any(any(k in c for k in subject_kw)for c in normalized_columns)
-    has_year   = any(any(k in c for k in year_kw)   for c in normalized_columns)
-    has_sem    = any(any(k in c for k in sem_kw)    for c in normalized_columns)
-
-    return has_subj and (has_credit or has_gpa) and has_year and has_sem
+def ocr_with_easyocr(pdf_bytes):
+    """
+    用 EasyOCR 对每页做 OCR，回传所有行的文字列表。
+    """
+    reader = easyocr.Reader(['ch_tra','en'], gpu=False)
+    imgs = convert_from_bytes(pdf_bytes)
+    lines = []
+    for img in imgs:
+        result = reader.readtext(
+            np.array(img),
+            detail=0,           # 只取文字，不要框坐标
+            paragraph=False     # 单行输出
+        )
+        lines.extend(result)
+    return [normalize(l) for l in lines if normalize(l)]
 
 def process_pdf_file(uploaded_file):
-    all_grades_data = []
-    full_text = ""
+    """
+    主流程：
+    1. 先用 pdfplumber 尝试抽表格并识别成绩表
+    2. 如果没抽到任何表格，就用 OCR（EasyOCR）把整份 PDF 转成行
+    3. 再用行级正则把“學年度 學期 科目 學分 GPA”分离出来，拼 DataFrame 返回
+    """
+    raw = uploaded_file.read()
+    dfs = []
 
+    # --- 步骤 1：pdfplumber 提取表格 ---
     try:
-        with pdfplumber.open(uploaded_file) as pdf:
-            # 先嘗試 extract_tables
-            for page_num, page in enumerate(pdf.pages):
-                # 同步累積全文
-                txt = page.extract_text() or ""
-                full_text += normalize_text(txt) + "\n"
-
-                table_settings = {
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                    "snap_tolerance": 3,
-                    "join_tolerance": 5,
-                    "edge_min_length": 3,
-                    "text_tolerance": 2,
-                    "min_words_vertical": 1,
-                    "min_words_horizontal": 1,
-                }
-                tables = page.extract_tables(table_settings)
-                if not tables:
-                    continue
-
-                for tidx, table in enumerate(tables):
-                    rows = []
-                    for row in table:
-                        norm = [normalize_text(c) for c in row]
-                        if any(cell for cell in norm):
-                            rows.append(norm)
-                    if not rows or len(rows[0]) < 3:
-                        continue
-                    header, data_rows = rows[0], rows[1:]
-                    cols = make_unique_columns(header)
-                    cleaned = []
-                    for r in data_rows:
-                        if len(r) > len(cols):
-                            cleaned.append(r[:len(cols)])
-                        elif len(r) < len(cols):
-                            cleaned.append(r + [""] * (len(cols) - len(r)))
-                        else:
-                            cleaned.append(r)
-                    try:
-                        df = pd.DataFrame(cleaned, columns=cols)
-                        if is_grades_table(df):
-                            all_grades_data.append(df)
-                            st.success(f"頁面 {page_num+1} 表格 {tidx+1} 已識別並處理。")
-                    except Exception:
-                        continue
-
-        # 如果已成功從表格提取任何資料，直接回傳
-        if all_grades_data:
-            return all_grades_data
-
-        # 第二道 fallback：純文字 header+行分割
-        for page_text in full_text.split("\n"):
-            # 找到包含「學年度」「學分」「GPA」的 header
-            if re.search(r'學年度.*學分.*GPA', page_text):
-                hdr = re.split(r'\s{2,}', page_text)
-                data = []
-                for line in full_text.split("\n"):
-                    if re.match(r'^\d{3,4}\s', line):
-                        parts = re.split(r'\s{2,}', line)
-                        if len(parts) >= len(hdr):
-                            data.append(parts[:len(hdr)])
-                if data:
-                    cols = make_unique_columns(hdr)
-                    all_grades_data.append(pd.DataFrame(data, columns=cols))
-                    st.success("純文字 header fallback 已處理整份 PDF。")
-                    return all_grades_data
-
-        # 第三道 fallback：正則整頁匹配
-        pattern = re.compile(
-            r'(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)'
-        )
-        matches = pattern.findall(full_text)
-        if matches:
-            rows = []
-            for year, sem, subj, cred, gpa in matches:
-                rows.append([year, sem, subj, cred, gpa])
-            df = pd.DataFrame(rows, columns=["學年度","學期","科目名稱","學分","GPA"])
-            all_grades_data.append(df)
-            st.success("Regex fallback 已處理整份 PDF。")
-            return all_grades_data
-
-    except pdfplumber.PDFSyntaxError as e:
-        st.error(f"PDF 語法錯誤: {e}")
+        with pdfplumber.open(io.BytesIO(raw)) as pdf:
+            for p in pdf.pages:
+                tables = p.extract_tables({
+                    "vertical_strategy":"lines",
+                    "horizontal_strategy":"lines",
+                    "snap_tolerance":3,
+                    "join_tolerance":5,
+                    "edge_min_length":3,
+                    "text_tolerance":2
+                })
+                for tbl in tables:
+                    df = _table_to_df(tbl)
+                    if _is_grades_table(df):
+                        dfs.append(df)
     except Exception as e:
-        st.error(f"處理 PDF 時發生錯誤: {e}")
+        st.warning(f"pdfplumber 失败: {e}")
 
-    # 最後：若未成功提取
-    return all_grades_data
+    if dfs:
+        st.success(f"成功从 PDF 表格 提取到 {len(dfs)} 张成绩表")
+        return dfs
+
+    # --- 步骤 2：OCR 后备 ---
+    st.info("未检测到表格，启用 OCR 后备 (EasyOCR)…")
+    try:
+        lines = ocr_with_easyocr(raw)
+    except Exception as e:
+        st.error(f"OCR 出错: {e}")
+        return []
+
+    if not lines:
+        st.error("OCR 也未识别到任何文字")
+        return []
+
+    # --- 步骤 3：行级正则提取 ---
+    # 合并断行：逐行累 buffer，直到匹配末尾 pattern
+    end_pat = re.compile(r".+\s+\d+(\.\d+)?\s+([A-F][+\-]?|通過|抵免)$")
+    merged = []
+    buf = ""
+    for l in lines:
+        if buf:
+            l = buf + " " + l
+            buf = ""
+        if not end_pat.match(l):
+            buf = l
+        else:
+            merged.append(l)
+    # 再用正则分组
+    entry_pat = re.compile(
+        r"(\d{3,4})\s*(上|下|春|夏|秋|冬)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-F][+\-]?|通過|抵免)$"
+    )
+    rows = []
+    for l in merged:
+        m = entry_pat.match(l)
+        if not m: 
+            # 可以打印日志看看哪些没匹配上
+            st.debug(f"OCR 未匹配: {l}")
+            continue
+        y, sem, subj, cr, gpa = m.groups()
+        rows.append({
+            "學年度": y,
+            "學期": sem,
+            "科目名稱": normalize(subj),
+            "學分": float(cr),
+            "GPA": gpa
+        })
+
+    if not rows:
+        st.warning("OCR 匹配后仍无有效课程行")
+        return []
+
+    df_final = pd.DataFrame(rows)
+    st.success(f"OCR 共解析到 {len(rows)} 门课程")
+    return [df_final]
