@@ -82,13 +82,14 @@ def process_pdf_file(uploaded_file):
             if tables:
                 return tables
 
-            st.info("未检测到表格，启用纯文字回退解析…")
+            st.info("未檢測到表格，启用純文字回退解析…")
             fallback_df = regex_fallback_to_df(pdf)
             if fallback_df is not None:
                 return [fallback_df]
             else:
-                st.warning("纯文字回退也未识别到任何记录。")
+                st.warning("純文字回退也未識別到任何紀錄。")
                 return []
     except Exception as e:
-        st.error(f"PDF 解析失败：{e}")
+        st.error(f"PDF 解析失敗：{e}")
         return []
+
