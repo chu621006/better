@@ -2,7 +2,7 @@
 
 import pandas as pd
 import re
-from .pdf_processing import normalize_text
+from .pdf_processing import normalize as normalize_text
 
 def is_passing_gpa(gpa_str):
     gpa_clean = normalize_text(gpa_str).upper()
@@ -141,5 +141,6 @@ def calculate_total_credits(df_list):
             st.warning(
                 f"表格{df_idx+1}偵測到未完成的科目名稱「{buffer_row['科目名稱']}」，已跳過"
             )
+
 
     return total_credits, calculated_courses, failed_courses
