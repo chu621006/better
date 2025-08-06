@@ -1,9 +1,7 @@
 # utils/grade_analysis.py
-
 import pandas as pd
 import re
 from .pdf_processing import normalize as normalize_text
-
 def is_passing_gpa(gpa_str):
     gpa_clean = normalize_text(gpa_str).upper()
     failing_grades = ["D", "D-", "E", "F", "X", "不通過", "未通過", "不及格"]
@@ -144,3 +142,4 @@ def calculate_total_credits(df_list):
 
 
     return total_credits, calculated_courses, failed_courses
+
